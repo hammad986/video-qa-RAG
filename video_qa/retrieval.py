@@ -1,0 +1,102 @@
+"""
+Retrieval Module for Video-QA System
+Handles vector-based retrieval from FAISS index.
+"""
+
+from typing import List, Dict, Any, Optional
+
+from .config import config
+from .logger import get_logger
+from .embeddings import VectorStore, create_embeddings
+
+
+logger = get_logger(__name__)
+
+
+class RetrievalSystem:
+    """Vector retrieval system."""
+    
+    def __init__(self):
+        """Initialize retrieval system."""
+        self.vector_store = None
+        self._initialize()
+    
+    def _initialize(self):
+        """Initialize vector store."""
+        index_path = config.get("retrieval.index_path", "models/video_index.faiss")
+        metadata_path = config.get("retrieval.metadata_path", "models/metadata.pkl")
+        
+        self.vector_store = VectorStore(index_path, metadata_path)
+        
+        if self.vector_store.index is None:
+            logger.warning("Vector store not initialized. Please process videos first.")
+    
+    def retrieve(
+        self,
+        query: str,
+        top_k: Optional[int] = None,
+        min_score: Optional[float] = None,
+        video_id: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Retrieve relevant chunks for a query.
+        
+        Args:
+            query: User question
+            top_k: Number of results (default from config)
+            min_score: Minimum similarity score (default from config)
+            
+        Returns:
+            List of relevant chunks with scores
+        """
+        if self.vector_store is None or self.vector_store.index is None:
+            logger.error("Vector store not available")
+            return []
+        
+        # Get config values
+        if top_k is None:
+            top_k = config.get("retrieval.top_k", 20)
+        if min_score is None:
+            min_score = config.get("retrieval.min_score", 0.0)
+        
+        logger.info(f"Retrieving top-{top_k} chunks for query: {query[:50]}...")
+        
+        results = self.vector_store.search(query, top_k, min_score, video_id=video_id)
+        
+        logger.info(f"Retrieved {len(results)} relevant chunks")
+        
+        return results
+    
+    def is_available(self) -> bool:
+        """Check if retrieval system is ready."""
+        return self.vector_store is not None and self.vector_store.index is not None
+
+
+def retrieve_chunks(
+    query: str,
+    top_k: Optional[int] = None,
+    video_id: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """
+    Convenience function to retrieve chunks.
+    
+    Args:
+        query: User question
+        top_k: Number of results
+        
+    Returns:
+        List of relevant chunks
+    """
+    retriever = RetrievalSystem()
+    return retriever.retrieve(query, top_k, video_id=video_id)
+
+
+if __name__ == "__main__":
+    # Test retrieval
+    query = "What is machine learning?"
+    results = retrieve_chunks(query)
+    
+    print(f"\nRetrieved {len(results)} results:")
+    for i, r in enumerate(results[:5], 1):
+        print(f"\n{i}. Score: {r.get('score', 0):.3f}")
+        print(f"   Text: {r.get('text', '')[:100]}...")
