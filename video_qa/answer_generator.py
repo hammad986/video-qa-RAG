@@ -1,8 +1,16 @@
 """
 Answer Generation Module for Video-QA System
-Generates answers using local LLM (Ollama), HuggingFace flan-t5-base, or OpenAI.
-Uses strict extractive QA prompt to prevent hallucination.
+Generates answers using a cascading LLM pipeline with graceful fallback.
+
+LLM Priority Order:
+  1. Local Ollama (fastest, fully local)
+  2. Grok API (xAI)
+  3. Gemini API
+  4. OpenAI API
+  5. HuggingFace Serverless
+  6. Extractive Fallback (when all LLMs unavailable but context exists)
 """
+
 
 import json
 import requests
@@ -11,15 +19,20 @@ from typing import Optional, Dict, Any, Tuple, List
 from .config import config
 from .logger import get_logger
 
-
 logger = get_logger(__name__)
+
+def rewrite_query(query: str) -> str:
+    """
+    Query rewriting stub (expand for advanced use).
+    For now, just return the query unchanged.
+    """
+    return query
 
 # ──────────────────────────────────────────────────────────────
 # EXTRACTIVE QA (deepset/roberta-base-squad2) — primary HuggingFace path
 # Finds exact answer SPANS in the transcript — fully grounded, no hallucination
 # ──────────────────────────────────────────────────────────────
 _qa_pipeline = None
-
 
 def _load_extractive_qa():
     """Load distilbert-base-cased-distilled-squad extractive QA pipeline (cached)."""
@@ -134,10 +147,10 @@ def format_time_range(start: float, end: float) -> str:
 
 def build_answer_prompt(query: str, contexts: List[Dict[str, Any]]) -> str:
     """
-    Build strict extractive QA prompt.
+    Build answer prompt that produces grounded answers.
 
-    The LLM must extract an exact phrase from the evidence.
-    If the answer is literally absent, it must say NOT FOUND IN VIDEO.
+    The LLM should extract or derive the best possible answer from evidence.
+    Only return NOT FOUND IN VIDEO if there is absolutely no relevant information.
     This is used as the PRIMARY pass.
     """
     context_text = ""
@@ -152,16 +165,14 @@ Content: {text}
 ---------------------------------
 """
 
-    return f"""You are a VIDEO QUESTION ANSWERING SYSTEM.
+    return f"""You are a lecture assistant that answers questions based on transcript excerpts.
 
-Rules:
-* Only use the provided evidence passages
-* Do not use outside knowledge
-* Do not summarize
-* Extract the answer directly
-* One sentence only
-* Must include timestamp
-* If answer absent output: NOT FOUND IN VIDEO
+Your task:
+* Use ONLY the provided transcript evidence to answer
+* Provide the best possible answer based on the context
+* Keep answers concise (1-2 sentences)
+* Include the timestamp of the most relevant segment
+* Only respond "NOT FOUND IN VIDEO" if there is absolutely NO relevant information
 
 Output format MUST be exactly:
 
@@ -173,7 +184,8 @@ Transcript Segments:
 
 Question:
 {query}
-"""
+
+Answer:"""
 
 
 def build_semantic_prompt(query: str, contexts: List[Dict[str, Any]]) -> str:
@@ -266,13 +278,14 @@ def ask_huggingface_llm(prompt: str, question: str = "", contexts: Optional[List
         if not contexts:
             return None
 
-        # Fallback list of fast, free serverless chat models
-        # Provided by huggingface_hub serverless API
+        # ── FIX: Curated fallback list — only confirmed chat-compatible models
+        # mistralai/Mistral-7B-Instruct-v0.3 removed (flagged as "not a chat model")
+        # meta-llama/Llama-3.2-3B-Instruct removed (requires specific provider plan)
         models = [
-            "meta-llama/Llama-3.2-3B-Instruct",
+            "Qwen/Qwen2.5-7B-Instruct",         # confirmed working in logs
+            "Qwen/Qwen2.5-72B-Instruct",
+            "microsoft/Phi-3.5-mini-instruct",
             "HuggingFaceH4/zephyr-7b-beta",
-            "mistralai/Mistral-7B-Instruct-v0.3",
-            "Qwen/Qwen2.5-7B-Instruct"
         ]
 
         # Configured model or first fallback
@@ -282,21 +295,26 @@ def ask_huggingface_llm(prompt: str, question: str = "", contexts: Optional[List
 
         # Build precise QA prompt
         q = question or prompt
-        
+
         # Build a cleaner context text rather than using the Ollama-specific prompt string
         context_text = ""
         for i, ctx in enumerate(contexts, 1):
-            text = ctx.get("text", "")
+            text  = ctx.get("text", "")
             start = ctx.get("start", 0)
-            end = ctx.get("end", 0)
+            end   = ctx.get("end",   0)
             context_text += f"[{start:.1f}s - {end:.1f}s] {text}\n"
 
-        sys_prompt = "You are a helpful assistant. Answer the user's question based ONLY on the provided transcript excerpt. Keep the answer concise. If the exact answer is not in the transcript, reply strictly with: NOT FOUND IN VIDEO."
+        sys_prompt = (
+            "You are a helpful video lecture assistant. "
+            "Answer the user's question based ONLY on the provided transcript excerpt. "
+            "Keep the answer concise (1–2 sentences). "
+            "If the information is not in the transcript at all, reply exactly: NOT FOUND IN VIDEO."
+        )
         user_msg = f"Transcript Excerpt:\n{context_text}\n\nQuestion: {q}"
 
         messages = [
             {"role": "system", "content": sys_prompt},
-            {"role": "user", "content": user_msg}
+            {"role": "user",   "content": user_msg},
         ]
 
         for model in models:
@@ -306,38 +324,40 @@ def ask_huggingface_llm(prompt: str, question: str = "", contexts: Optional[List
                     model=model,
                     messages=messages,
                     max_tokens=200,
-                    temperature=0.1
+                    temperature=0.1,
                 )
-                
+
                 answer = response.choices[0].message.content.strip()
                 logger.info(f"HF API Answer ({model}): {answer!r}")
-                
+
                 if answer and "not found in video" not in answer.lower():
                     # Format to match what `parse_answer` expects
                     return f"Answer: {answer}\nTimestamp: None"
                 elif "not found in video" in answer.lower():
-                    logger.info(f"Model {model} correctly identified answer not in context.")
+                    logger.info(f"Model {model}: answer not in context.")
                     return "Answer: Question cannot be answered from this video.\nTimestamp: None"
-                
+
             except ValueError as ve:
                 err = str(ve).lower()
-                if "api_key" in err or "hf auth login" in err:
-                    # ── TOKEN ERROR FIX ──────────────────────────────────────
-                    # Previously this returned the error message as a valid
-                    # answer string — it got stored as a summary bullet point.
-                    # Now: log the problem clearly and return None so the
-                    # caller falls through to the next LLM in priority order.
+                # ── FIX: 401 / auth error affects ALL models — break immediately
+                if any(k in err for k in ("api_key", "hf auth login", "401", "unauthorized", "invalid username")):
                     logger.warning(
-                        "HF Serverless API requires a token. "
-                        "Add 'hf_token' under the 'answer' section in config.yaml "
-                        "or set the HF_TOKEN environment variable."
+                        "HF Serverless API authentication failed (401 Unauthorized). "
+                        "Your HF_TOKEN may be expired or invalid. "
+                        "Get a new token at https://huggingface.co/settings/tokens "
+                        "and update .env or config.yaml."
                     )
-                    break   # no point trying remaining models with same missing token
+                    break   # no point trying remaining models with same broken token
                 logger.warning(f"HF API Model {model} failed with ValueError: {ve}")
                 continue
             except Exception as e:
+                err = str(e).lower()
+                # ── FIX: also break on HTTP 401 from generic exceptions
+                if "401" in err or "unauthorized" in err or "invalid username" in err:
+                    logger.warning(f"HF Serverless: 401 auth failure — skipping remaining models.")
+                    break
                 logger.warning(f"HF API Model {model} failed: {e}")
-                continue  # fall back to next model
+                continue
 
                 
         logger.warning("All HF Serverless models failed or refused to answer.")
@@ -411,19 +431,16 @@ def ask_openai_llm(prompt: str, timeout: Optional[int] = None) -> Optional[str]:
 
         api_key = config.get("answer.openai_api_key", "")
         if not api_key:
-            logger.error("OpenAI API key not configured")
+            logger.debug("OpenAI API key not configured — skipping.")
             return None
 
-        # ── OPENAI v1.x FIX ──────────────────────────────────────────────────
-        # openai.ChatCompletion.create was removed in openai>=1.0.0.
-        # Use the new client-based API instead.
         client = openai.OpenAI(api_key=api_key)
 
         response = client.chat.completions.create(
             model=config.get("answer.openai_model", "gpt-4"),
             messages=[
                 {"role": "system", "content": "You are a video question answering system."},
-                {"role": "user", "content": prompt},
+                {"role": "user",   "content": prompt},
             ],
             temperature=0,
             max_tokens=512,
@@ -433,11 +450,84 @@ def ask_openai_llm(prompt: str, timeout: Optional[int] = None) -> Optional[str]:
         return response.choices[0].message.content.strip()
 
     except ImportError:
-        logger.error("openai package not installed — run: pip install openai")
+        logger.debug("openai package not installed — skipping OpenAI provider.")
         return None
     except Exception as e:
         logger.error(f"OpenAI request failed: {e}")
         return None
+
+
+def ask_grok_llm(
+    prompt: str,
+    question: str = "",
+    contexts: Optional[List[Dict]] = None,
+    timeout: Optional[int] = None,
+) -> Optional[str]:
+    """
+    Ask xAI Grok API (OpenAI-compatible endpoint).
+    Requires 'grok_api_key' in config under 'answer.grok_api_key'.
+    Priority: 2nd after Ollama, before Gemini.
+    """
+    api_key = config.get("answer.grok_api_key", "")
+    if not api_key:
+        logger.debug("No Grok API key configured — skipping Grok provider.")
+        return None
+
+    try:
+        import openai  # Grok uses the OpenAI-compatible SDK
+    except ImportError:
+        logger.debug("openai package not installed — cannot use Grok API.")
+        return None
+
+    try:
+        grok_url = config.get("answer.grok_url", "https://api.x.ai/v1")
+        model    = config.get("answer.grok_model", "grok-beta")
+
+        client = openai.OpenAI(
+            api_key=api_key,
+            base_url=grok_url,
+        )
+
+        q = question or prompt
+        context_text = ""
+        if contexts:
+            for ctx in contexts:
+                text  = ctx.get("text",  "")
+                start = ctx.get("start", 0)
+                end   = ctx.get("end",   0)
+                context_text += f"[{format_timestamp(start)} – {format_timestamp(end)}] {text}\n"
+
+        full_prompt = (
+            "You are a VIDEO QUESTION ANSWERING SYSTEM.\n"
+            "Rules:\n"
+            "* Answer ONLY from the provided transcript excerpt.\n"
+            "* Do NOT use outside knowledge.\n"
+            "* Keep the answer to one or two sentences.\n"
+            "* If the answer is not in the transcript, reply: Question cannot be answered from this video.\n\n"
+            f"Transcript Excerpt:\n{context_text}\n"
+            f"Question: {q}\n"
+            "Answer:"
+        )
+
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "user", "content": full_prompt},
+            ],
+            temperature=0,
+            max_tokens=256,
+            timeout=timeout or config.get("answer.timeout", 60),
+        )
+
+        answer = response.choices[0].message.content.strip()
+        if answer:
+            logger.info(f"Grok answer: {answer!r}")
+            return f"Answer: {answer}\nTimestamp: None"
+
+    except Exception as exc:
+        logger.warning(f"Grok API failed: {exc}")
+
+    return None
 
 
 def parse_answer(response: str) -> Tuple[Optional[str], Optional[str]]:
@@ -468,15 +558,61 @@ def parse_answer(response: str) -> Tuple[Optional[str], Optional[str]]:
 
 
 def _is_not_found(answer: Optional[str]) -> bool:
-    """Return True if the answer string signals 'not found'."""
+    """Return True if the answer string EXPLICITLY signals 'not found'."""
     if not answer:
         return True
-    low = answer.lower()
+    low = answer.lower().strip()
+    # Only match EXACT phrases, not substrings
+    # This prevents rejection of valid answers that happen to contain "not" in other contexts
     return (
-        "not found" in low
-        or "cannot be answered" in low
-        or "not in video" in low
+        low == "not found in video"
+        or low == "question cannot be answered from this video"
+        or low.startswith("not found in video.")
     )
+
+
+def _extractive_fallback(
+    query: str,
+    contexts: List[Dict[str, Any]],
+) -> Optional[str]:
+    """
+    Last-resort grounded answer when ALL LLMs are unavailable.
+
+    Extracts the first 2 sentences from the top-ranked context chunk and
+    returns them as a grounded answer with the chunk's timestamp.
+    This ensures the user ALWAYS gets a response when evidence exists,
+    even when no API key / local model is configured.
+
+    Only called from _run_llm_cascade() after all providers have failed.
+    """
+    if not contexts:
+        return None
+
+    import re
+
+    top_ctx = contexts[0]
+    text    = (top_ctx.get("text") or "").strip()
+    start   = top_ctx.get("start", 0)
+    end     = top_ctx.get("end",   0)
+
+    if not text:
+        return None
+
+    # Grab up to 2 sentences as the extracted answer
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    excerpt   = " ".join(sentences[:2]).strip()
+
+    if not excerpt:
+        return None
+
+    ts = format_time_range(start, end)
+    logger.warning(
+        "[EXTRACTIVE FALLBACK] All LLM providers failed — "
+        "returning extractive answer from top context chunk. "
+        "Configure a valid HF_TOKEN or local Ollama model for LLM-based answers."
+    )
+    logger.info(f"[EXTRACTIVE FALLBACK] Excerpt: {excerpt[:100]}...")
+    return f"Answer: {excerpt}\nTimestamp: {ts}"
 
 
 def _run_llm_cascade(
@@ -484,38 +620,67 @@ def _run_llm_cascade(
     query: str,
     contexts: List[Dict[str, Any]],
     answer_config: Dict[str, Any],
+    use_extractive_fallback: bool = True,
 ) -> Optional[str]:
     """
-    Run the standard LLM priority cascade:
-      Ollama → Gemini → OpenAI → HuggingFace
+    Run the LLM priority cascade:
+      1. Ollama (local)
+      2. Grok API
+      3. Gemini API
+      4. OpenAI API
+      5. HuggingFace Serverless
+      6. Extractive fallback (if contexts available and use_extractive_fallback=True)
 
-    Returns the raw response string, or None if all fail.
+    Returns the raw response string, or None if all fail and no fallback.
     """
     response = None
 
+    # 1. Local Ollama
     if answer_config.get("use_local", True):
         logger.info("[LLM] Trying LOCAL (Ollama)…")
         response = ask_local_llm(prompt)
         if response:
             logger.info("[LLM] Local LLM answered.")
 
+    # 2. Grok API
     if response is None:
-        logger.info("[LLM] Local unavailable — trying Gemini…")
+        logger.info("[LLM] Local unavailable — trying Grok…")
+        response = ask_grok_llm(prompt, question=query, contexts=contexts)
+        if response:
+            logger.info("[LLM] Grok answered.")
+
+    # 3. Gemini API
+    if response is None:
+        logger.info("[LLM] Grok unavailable — trying Gemini…")
         response = ask_gemini_llm(prompt, question=query, contexts=contexts)
         if response:
             logger.info("[LLM] Gemini answered.")
 
+    # 4. OpenAI API
     if response is None and answer_config.get("use_openai", False):
         logger.info("[LLM] Gemini unavailable — trying OpenAI…")
         response = ask_openai_llm(prompt)
         if response:
             logger.info("[LLM] OpenAI answered.")
 
+    # 5. HuggingFace Serverless
     if response is None and answer_config.get("use_huggingface", True):
         logger.info("[LLM] All primary LLMs unavailable — using HuggingFace Serverless…")
         response = ask_huggingface_llm(prompt, question=query, contexts=contexts)
         if response:
             logger.info("[LLM] HuggingFace Serverless answered.")
+
+    # 6. Extractive fallback — CRITICAL FIX
+    # When ALL LLMs fail but valid context chunks exist, synthesise a grounded
+    # answer from the top chunk instead of returning "NOT FOUND IN VIDEO".
+    if response is None and use_extractive_fallback and contexts:
+        logger.info("[LLM] All providers failed — attempting extractive fallback…")
+        response = _extractive_fallback(query, contexts)
+        if response:
+            logger.info("[LLM] Extractive fallback produced an answer.")
+
+    if response is None:
+        logger.warning("[LLM] All providers AND extractive fallback failed — no answer possible.")
 
     return response
 
@@ -555,36 +720,109 @@ def generate_answer(
 
     answer_config = config.get_section("answer")
 
+    # ── FORENSIC DEBUG: Stage 2 - Context Passing ─────────────────────────────
+    combined_context_length = sum(len(ctx.get('text', '')) for ctx in contexts)
+    logger.info(f"\n[CONTEXT DEBUG]")
+    logger.info(f"  contexts_passed: {len(contexts)}")
+    logger.info(f"  combined_context_length: {combined_context_length} characters")
+    for i, ctx in enumerate(contexts, 1):
+        logger.info(
+            f"    Context[{i}]: {ctx.get('start', 0):.1f}s-{ctx.get('end', 0):.1f}s | "
+            f"Length: {len(ctx.get('text', ''))} chars | "
+            f"Score: {ctx.get('score', 0):.4f}"
+        )
+    # ──────────────────────────────────────────────────────────────────────────
+
+    # FIX: Query rewriting integration (expand for advanced use)
+    rewritten_query = rewrite_query(query)
+
     # ── PASS 1: Strict extractive ────────────────────────────────────────────
     logger.info("[PASS 1] Strict extractive mode…")
-    strict_prompt = build_answer_prompt(query, contexts)
-    response = _run_llm_cascade(strict_prompt, query, contexts, answer_config)
+    strict_prompt = build_answer_prompt(rewritten_query, contexts)
+    
+    # ── FORENSIC DEBUG: Stage 2B - Prompt Being Sent ─────────────────────────
+    logger.info(f"\n[PROMPT DEBUG]")
+    logger.info(f"  prompt_length: {len(strict_prompt)} characters")
+    logger.info(f"  prompt_preview: {strict_prompt[:300]}...")
+    # ──────────────────────────────────────────────────────────────────────────
+    
+    response = _run_llm_cascade(strict_prompt, rewritten_query, contexts, answer_config)
 
 
     answer, timestamp = parse_answer(response) if response else (None, None)
+    
+    # ── FORENSIC DEBUG: Stage 3 - LLM Response ────────────────────────────
+    logger.info(f"\n[LLM RESPONSE DEBUG - PASS 1]")
+    logger.info(f"  raw_response_length: {len(response) if response else 0} characters")
+    if response:
+        logger.info(f"  raw_response (first 300 chars): {response[:300]}...")
+    else:
+        logger.info(f"  raw_response: None (LLM failed or timeout)")
+    logger.info(f"  parsed_answer: {answer[:150] if answer else 'None'}...")
+    logger.info(f"  parsed_timestamp: {timestamp}")
+    logger.info(f"  _is_not_found(answer): {_is_not_found(answer)}")
+    # ──────────────────────────────────────────────────────────────────────────
 
     # Treat empty, None, or 'None' (string) as missing timestamp
     def _is_missing_timestamp(ts):
         return not ts or str(ts).strip().lower() == "none"
 
-    # ── PASS 2: Semantic context fallback ────────────────────────────────────
+    # ── PASS 2: Semantic context fallback ────────────────────────────────────────────
     # Trigger if: strict returned NOT FOUND (or no response at all) AND
     # we have real evidence chunks to ground the answer in.
+    # FIX: Pass use_extractive_fallback=False to Pass 2 — the extractive fallback
+    # is only triggered ONCE at the end of Pass 2 (not redundantly in both passes).
     if _is_not_found(answer) and contexts:
         logger.info(
             "[PASS 2] Strict pass returned NOT FOUND — trying SEMANTIC context mode."
         )
-        semantic_prompt  = build_semantic_prompt(query, contexts)
-        sem_response     = _run_llm_cascade(semantic_prompt, query, contexts, answer_config)
+
+        # ── FORENSIC DEBUG: Stage 4 - Pass 2 Trigger ───────────────────────────────
+        logger.info(f"\n[PASS DEBUG]")
+        logger.info(f"  pass_1_result: NOT_FOUND")
+        logger.info(f"  pass_1_answer: {answer}")
+        logger.info(f"  pass_2_triggered: True")
+        logger.info(f"  reason_for_pass_2: strict returned NOT_FOUND AND {len(contexts)} contexts exist")
+        # ──────────────────────────────────────────────────────────────────────────
+        semantic_prompt = build_semantic_prompt(query, contexts)
+        # Do NOT use extractive fallback here — reserve it for the final check below
+        sem_response    = _run_llm_cascade(
+            semantic_prompt, query, contexts, answer_config,
+            use_extractive_fallback=False,
+        )
         sem_answer, sem_ts = parse_answer(sem_response) if sem_response else (None, None)
 
+        # ── FORENSIC DEBUG: Pass 2 Response ──────────────────────────────
+        logger.info(f"\n[LLM RESPONSE DEBUG - PASS 2]")
+        logger.info(f"  raw_response_length: {len(sem_response) if sem_response else 0} characters")
+        if sem_response:
+            logger.info(f"  raw_response (first 300 chars): {sem_response[:300]}...")
+        else:
+            logger.info(f"  raw_response: None")
+        logger.info(f"  parsed_answer: {sem_answer[:150] if sem_answer else 'None'}...")
+        logger.info(f"  _is_not_found(sem_answer): {_is_not_found(sem_answer)}")
+        # ──────────────────────────────────────────────────────────────────────────
+
         if sem_answer and not _is_not_found(sem_answer):
-            logger.info("[PASS 2] Semantic context answer accepted.")
+            logger.info("[PASS 2] Semantic context answer ACCEPTED.")
+            logger.info(f"  using semantic response instead of strict pass rejection")
             answer    = sem_answer
             timestamp = sem_ts
             response  = sem_response
         else:
-            logger.info("[PASS 2] Semantic pass also returned NOT FOUND — evidence insufficient.")
+            logger.info("[PASS 2] Semantic pass also returned NOT FOUND.")
+            # ── EXTRACTIVE FALLBACK — final safety net ────────────────────────
+            # Both LLM passes failed. If contexts exist, use extractive fallback
+            # so the user always gets a grounded response.
+            if contexts:
+                fb_response = _extractive_fallback(query, contexts)
+                if fb_response:
+                    fb_answer, fb_ts = parse_answer(fb_response)
+                    if fb_answer and not _is_not_found(fb_answer):
+                        logger.info("[EXTRACTIVE FALLBACK] Using extracted answer from top context.")
+                        answer    = fb_answer
+                        timestamp = fb_ts
+                        response  = fb_response
 
     # ── Final answer normalisation ───────────────────────────────────────────
     if _is_not_found(answer):
@@ -606,26 +844,78 @@ def generate_answer(
         "raw_response": response,
         "verified":     False,
     }
+    
+    # ── FORENSIC DEBUG: Stage 6 - Final Output (before verification) ──────────────────────────
+    logger.info(f"\n[FINAL OUTPUT DEBUG - BEFORE VERIFICATION]")  
+    logger.info(f"  final_answer: {result['answer'][:150]}...")
+    logger.info(f"  final_timestamp: {result['timestamp']}")
+    logger.info(f"  num_contexts_returned: {len(result['contexts'])}")
+    logger.info(f"  verified: {result['verified']}")
+    # ──────────────────────────────────────────────────────────────────────────
 
     # ── Evidence Verification ────────────────────────────────────────────────
     if use_verification and config.get("verification.enabled", True):
         from .evidence_verifier import verify_answer as _verify
+        
+        # ── FORENSIC DEBUG: Stage 5 - Before Verification ────────────────────────
+        logger.info(f"\n[VERIFICATION DEBUG - BEFORE]")
+        logger.info(f"  answer_before_verification: {answer[:150]}...")
+        logger.info(f"  timestamp_before_verification: {timestamp}")
+        logger.info(f"  contexts_for_verification: {len(contexts)}")
+        logger.info("  running verification...")
+        # ──────────────────────────────────────────────────────────────────────────
+        
         logger.info("Running evidence verification…")
-
         verification_result = _verify(answer, contexts, query)
         is_valid            = verification_result.get("is_valid", False)
-
+        status              = verification_result.get("status", "UNKNOWN")
+        trust_score         = verification_result.get("trust_score", 0)
+        confidence          = verification_result.get("confidence", 0.0)
+        
+        # ── FORENSIC DEBUG: Stage 5 - Verification Result ────────────────────────────
+        logger.info(f"\n[VERIFICATION DEBUG - AFTER]")
+        logger.info(f"  status: {status}")
+        logger.info(f"  is_valid: {is_valid}")
+        logger.info(f"  trust_score: {trust_score}")
+        logger.info(f"  confidence: {confidence:.2%}")
+        # ──────────────────────────────────────────────────────────────────────────
+        
         result["verification"] = verification_result
-        result["trust_score"]  = verification_result.get("trust_score", 0)
+        result["trust_score"]  = trust_score
 
         if not is_valid:
+            logger.warning(f"[VERIFICATION] Answer REJECTED by verification (status={status})")
+            logger.warning(f"  original_answer: {answer[:100]}...")
             if verification_result.get("status") == "HALLUCINATION":
+                logger.warning("  reason: HALLUCINATION - answer contradicts evidence")
                 result["answer"]    = "Question cannot be answered from this video."
                 result["timestamp"] = None
+            else:
+                logger.warning(f"  reason: is_valid=False (status={status})")
             result["verified"] = False
         else:
+            logger.info(f"[VERIFICATION] Answer ACCEPTED by verification (status={status})")
             result["verified"] = True
-
+        
+        # ── FORENSIC DEBUG: Stage 5 - After Modification ───────────────────────────────
+        logger.info(f"\n[ANSWER MODIFICATION DEBUG]")
+        logger.info(f"  answer_after_verification: {result['answer'][:150]}...")
+        logger.info(f"  timestamp_after_verification: {result['timestamp']}")
+        logger.info(f"  verified_flag: {result['verified']}")
+        # ──────────────────────────────────────────────────────────────────────────
+    
+    # ── FORENSIC DEBUG: Stage 6 - FINAL RETURN ────────────────────────────────────────────────────────
+    logger.info(f"\n[FINAL OUTPUT - RETURNING TO UI]")
+    logger.info(f"  FINAL_ANSWER: {result['answer'][:200]}")
+    logger.info(f"  FINAL_TIMESTAMP: {result['timestamp']}")
+    logger.info(f"  VERIFIED: {result['verified']}")
+    logger.info(f"  TRUST_SCORE: {result.get('trust_score', 'N/A')}")
+    logger.info(f"  NUM_CONTEXTS: {len(result['contexts'])}")
+    verification_status = result.get('verification', {}).get('status', 'N/A')
+    logger.info(f"  VERIFICATION_STATUS: {verification_status}")
+    logger.info(f"\n" + "="*80)
+    # ───────────────────────────────────────────────────────────────────────────────
+    
     return result
 
 

@@ -29,7 +29,14 @@ class Config:
         return cls._instance
     
     def _expand_env_vars(self, data: Any) -> Any:
-        """Recursively expand environment variables in config data."""
+        """Recursively expand environment variables in config data.
+
+        If a value is ${VAR_NAME} and the environment variable is not set,
+        returns an empty string rather than raising — this allows the system
+        to start cleanly even when optional API keys (Grok, Gemini, OpenAI,
+        HF) are not configured. Providers that need these keys will skip
+        themselves gracefully when they see an empty string.
+        """
         import re
         if isinstance(data, str):
             # Check if string matches ${VAR_NAME} pattern
@@ -38,7 +45,13 @@ class Config:
                 var_name = match.group(1)
                 value = os.getenv(var_name)
                 if value is None:
-                    raise ValueError(f"Environment variable '{var_name}' is not set. Please set it in your .env file or environment.")
+                    # Return "" so optional providers are silently skipped.
+                    # (Callers check `if not api_key: return None`)
+                    import logging as _logging
+                    _logging.getLogger(__name__).debug(
+                        f"Env var '{var_name}' not set — provider will be skipped."
+                    )
+                    return ""
                 return value
             else:
                 return data
@@ -48,7 +61,8 @@ class Config:
             return [self._expand_env_vars(item) for item in data]
         else:
             return data
-    
+
+
     def _load_config(self):
         """Load configuration from config.yaml"""
         # Load environment variables from .env file

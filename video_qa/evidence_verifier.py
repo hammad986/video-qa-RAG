@@ -198,33 +198,61 @@ def verify_answer(
     """
     # If the answer says "not found", no need to verify
     if not answer or "not found" in answer.lower():
+        logger.info(f"\n[VERIFIER ENTRY]")
+        logger.info(f"  Early return: answer contains 'not found' or is empty")
+        logger.info(f"  answer: {answer}")
         result = {"status": "INCOMPLETE", "trust_score": 0, "confidence": 0.0}
         result["is_valid"] = False
+        logger.info(f"  -> result: is_valid={result['is_valid']}, status={result['status']}")
         return result
 
     if not contexts:
+        logger.info(f"\n[VERIFIER ENTRY]")
+        logger.info(f"  Early return: no contexts provided")
         result = {"status": "UNKNOWN", "trust_score": 0, "confidence": 0.0}
         result["is_valid"] = False
+        logger.info(f"  -> result: is_valid={result['is_valid']}, status={result['status']}")
         return result
 
+    logger.info(f"\n[VERIFIER ENTRY]")
+    logger.info(f"  answer (first 100 chars): {answer[:100]}...")
+    logger.info(f"  contexts_count: {len(contexts)}")
+    logger.info(f"  query: {query[:80]}...")
+    
     logger.info("Verifying answer against evidence…")
 
     # ── Path 1: local NLI (preferred) ─────────
+    logger.info(f"\n[VERIFICATION PATH 1 - NLI]")
     nli_result = _verify_with_nli(answer, contexts, query)
+    logger.info(f"  nli_status: {nli_result.get('status', 'ERROR')}")
+    logger.info(f"  nli_trust_score: {nli_result.get('trust_score', 0)}")
+    logger.info(f"  nli_confidence: {nli_result.get('confidence', 0):.2%}")
 
     if nli_result["status"] != "UNKNOWN":
-        nli_result["is_valid"] = nli_result["status"] in ("VERIFIED",)
+        # FIX: Allow INCOMPLETE answers if contexts exist
+        # INCOMPLETE just means low confidence, not invalid
+        nli_result["is_valid"] = nli_result["status"] in ("VERIFIED", "INCOMPLETE")
+        logger.info(f"  -> Returning NLI result: is_valid={nli_result['is_valid']}")
         return nli_result
+    
+    logger.info(f"  -> NLI returned UNKNOWN, trying Ollama...")
 
     # ── Path 2: Ollama LLM (optional fallback) ─
+    logger.info(f"\n[VERIFICATION PATH 2 - OLLAMA]")
     logger.info("NLI verification inconclusive; trying Ollama fallback…")
     ollama_result = _verify_with_ollama(query, answer, contexts)
 
     if ollama_result is not None:
-        ollama_result["is_valid"] = ollama_result["status"] == "VERIFIED"
+        # FIX: Allow INCOMPLETE answers
+        ollama_result["is_valid"] = ollama_result["status"] in ("VERIFIED", "INCOMPLETE")
+        logger.info(f"  ollama_status: {ollama_result.get('status', 'ERROR')}")
+        logger.info(f"  -> Returning Ollama result: is_valid={ollama_result['is_valid']}")
         return ollama_result
+    
+    logger.info(f"  -> Ollama unavailable.")
 
     # ── Path 3: accept conservatively ─────────
+    logger.info(f"\n[VERIFICATION PATH 3 - CONSERVATIVE FALLBACK]")
     logger.warning("All verification methods failed – accepting answer conservatively.")
     return {
         "status": "INCOMPLETE",

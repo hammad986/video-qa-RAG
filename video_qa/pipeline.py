@@ -18,6 +18,7 @@ from typing import Optional, Dict, Any, List
 
 from .config import config
 from .logger import get_logger, setup_logger
+from .query_rewriter import rewrite_query
 
 from .video_processor import (
     take_video_input,
@@ -240,9 +241,18 @@ class VideoQAPipeline:
                 "error": "No videos processed"
             }
 
-        # Stage 5: Retrieval (top-20)
+        # Stage 5A: Query Rewrite
+        logger.info("\n[QUERY REWRITE] Optimizing search query...")
+        search_query = rewrite_query(query)
+        if search_query != query:
+            logger.info(f"Using search query: '{search_query}'")
+        else:
+            logger.info("Using original query for search.")
+
+        # Stage 5B: Retrieval (top-5)
+        # Use search_query for retrieving relevant chunks
         logger.info("\n[RETRIEVAL] Finding relevant passages...")
-        retrieved = self.retriever.retrieve(query, video_id=active_video_id)
+        retrieved = self.retriever.retrieve(search_query, top_k=5, video_id=active_video_id)
 
         if not retrieved:
             logger.warning("No relevant passages found")

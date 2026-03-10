@@ -90,29 +90,48 @@ reranking:
 # ANSWER GENERATION
 # ============================================
 answer:
-  # Local LLM (Ollama)
+  # ──────────────────────────────────────────────────────
+  # LLM CASCADE PRIORITY ORDER
+  # 1. Local Ollama  →  fastest, fully local, no API key needed
+  # 2. Grok API (xAI) →  set GROK_API_KEY in .env
+  # 3. Gemini API  →  set GEMINI_API_KEY in .env
+  # 4. OpenAI API  →  set OPENAI_API_KEY in .env
+  # 5. HuggingFace Serverless →  set HF_TOKEN in .env
+  # 6. Extractive fallback →  always available (no API key needed)
+  # ──────────────────────────────────────────────────────
+
+  # 1. Local LLM (Ollama)
   use_local: true
   local_model: "phi3:mini"  # or "llama3", "mistral", etc.
   ollama_url: "http://localhost:11434/api/generate"
   timeout: 180
-  
-  # OpenAI (optional — third priority after Gemini)
+
+  # 2. xAI Grok API (second priority — set GROK_API_KEY in .env to enable)
+  grok_api_key: ${GROK_API_KEY}
+  grok_model: "grok-beta"
+  grok_url: "https://api.x.ai/v1"
+
+  # 3. Google Gemini (third priority — set GEMINI_API_KEY in .env to enable)
+  gemini_api_key: ${GEMINI_API_KEY}
+  gemini_model: "gemini-1.5-flash"
+
+  # 4. OpenAI (optional — set OPENAI_API_KEY in .env to enable)
   use_openai: false
   openai_model: "gpt-4"
   openai_api_key: ${OPENAI_API_KEY}
 
-  # Google Gemini (optional — second priority after local Ollama)
-  gemini_api_key: ${GEMINI_API_KEY}
-  gemini_model: "gemini-1.5-flash"
-
-  # Hugging Face Serverless Chat API (last fallback — free, no GPU needed)
+  # 5. Hugging Face Serverless Chat API (last LLM fallback — set HF_TOKEN in .env)
   use_huggingface: true
-  hf_model: "meta-llama/Llama-3.2-3B-Instruct"
+  # First working model from logs; fallback list is in answer_generator.py
+  hf_model: "Qwen/Qwen2.5-7B-Instruct"
   hf_token: ${HF_TOKEN}
 
   # Prompt settings
   strict_mode: true
   extractive: true
+
+  # 6. Extractive fallback is always enabled (no config needed)
+  #    It triggers automatically when ALL LLM providers fail but context exists.
 
 # ============================================
 # EVIDENCE VERIFICATION

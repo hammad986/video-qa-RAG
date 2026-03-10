@@ -13,11 +13,19 @@ Fixes applied:
 import streamlit as st
 import os
 import sys
+from pathlib import Path
+
+# Add project root to sys.path natively before any package imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 import tempfile
 import shutil
 import asyncio
 import atexit
 import threading
+import time
+
+from video_qa.query_rewriter import rewrite_query
 
 # ── Windows asyncio fix (prevents "Event loop is closed" on shutdown) ──────
 if sys.platform == "win32":
@@ -47,8 +55,6 @@ def graceful_shutdown():
 
 atexit.register(graceful_shutdown)
 
-from pathlib import Path  # noqa: E402  (must be after asyncio policy)
-
 # ─────────────────────────────────────────────
 # Streamlit page config  (MUST be first st.* call)
 # ─────────────────────────────────────────────
@@ -58,9 +64,6 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
-
-# Add project root to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # ─────────────────────────────────────────────
 # Constants
@@ -161,7 +164,7 @@ def main():
     # ── Header ──────────────────────────────────────────────────────────────
     st.title("🎬 Video-QA: Lecture Assistant")
     st.markdown(
-        "**Research-Level Video Question Answering System** — "
+        "**Video Question Answering System** — "
         "Upload a lecture video, ask questions, and get evidence-grounded answers with timestamps."
     )
     st.markdown("---")
@@ -319,22 +322,30 @@ def _render_ask_tab():
     # ── Always render the form so Get Answer is never hidden ────────────────
 
 
-    # Use a dedicated session state key for the current input
+
+    # FIX: Persist question input and result across reruns
     if "current_question_input" not in st.session_state:
-        st.session_state.current_question_input = ""
+        st.session_state.current_question_input = st.session_state.get("last_question", "")
 
+    # FIX: Always show the last result if available, even after rerun
+    last_result = st.session_state.get("last_result")
+    last_question = st.session_state.get("last_question", "")
 
-    with st.form("qa_form", clear_on_submit=True):
-        question = st.text_area(
-            "Enter your question:",
-            height=80,
-            placeholder="What is the main topic of this lecture?",
-            value=st.session_state.current_question_input,
-            key="question_input_area"
-        )
-        submit = st.form_submit_button("🔍 Get Answer", type="primary", use_container_width=True)
-
-    # No longer update current_question_input here; it's handled by on_change
+    question = st.text_area(
+        "Enter your question:",
+        height=80,
+        placeholder="What is the main topic of this lecture?",
+        value=st.session_state.current_question_input,
+    )
+    
+    # Sync typed text to state so it doesn't revert on random reruns
+    st.session_state.current_question_input = question
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        rewrite = st.button("✨ Rewrite Question", use_container_width=True)
+    with col2:
+        submit = st.button("🔍 Get Answer", type="primary", use_container_width=True)
 
     with st.expander("💡 Example Questions"):
         st.markdown(
@@ -346,21 +357,33 @@ def _render_ask_tab():
             "- What did the lecturer say about [specific subject]?"
         )
 
-    # ── Handle submission ────────────────────────────────────────────────────
-
-    if submit:
+    # Handle button actions
+    if rewrite:
+        if not question.strip():
+            st.warning("Please enter a question to rewrite.")
+        else:
+            with st.spinner("✨ Optimizing your question via Gemini..."):
+                rewritten = rewrite_query(question, force=True)
+                
+            if rewritten and rewritten != question:
+                # Update the standalone value tracking variable
+                st.session_state.current_question_input = rewritten
+                st.success("✅ Question improved for better search.")
+                time.sleep(0.5) # tiny pause so user sees success message before rerun erases it
+                st.rerun()
+            else:
+                st.error("Rewrite failed or the text could not be improved. Please check your Gemini API key, or modify the text and try again.")
+                
+    elif submit:
         if not question.strip():
             st.warning("Please enter a question.")
         else:
-            # Only update last_question on submit
             st.session_state.last_question = question
             st.session_state.current_question_input = question
-            # CRITICAL: keep active_tab as "ask" during query — do NOT change it
             _run_answer_question(question)
-
-    # ── Show previous result if available ───────────────────────────────────
-    elif st.session_state.last_result is not None:
-        _display_results(st.session_state.last_question, st.session_state.last_result)
+            
+    elif last_result is not None and last_question:
+        _display_results(last_question, last_result)
 
 
 # ─────────────────────────────────────────────

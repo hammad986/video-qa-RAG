@@ -54,14 +54,29 @@ class RetrievalSystem:
             return []
         
         # Get config values
+        # FIX: Set default top_k=5 for improved answer quality
         if top_k is None:
-            top_k = config.get("retrieval.top_k", 20)
+            top_k = config.get("retrieval.top_k", 5)
         if min_score is None:
             min_score = config.get("retrieval.min_score", 0.0)
         
         logger.info(f"Retrieving top-{top_k} chunks for query: {query[:50]}...")
         
         results = self.vector_store.search(query, top_k, min_score, video_id=video_id)
+        
+        # ── FORENSIC DEBUG: Stage 1 - Retrieval Details ────────────────────────────
+        logger.info(f"\n[RETRIEVAL DEBUG] Total chunks retrieved: {len(results)}")
+        for i, chunk in enumerate(results, 1):
+            score = chunk.get('score', 0)
+            start = chunk.get('start', 0)
+            end = chunk.get('end', 0)
+            text = chunk.get('text', '')[:80]
+            logger.info(
+                f"  [Chunk {i}] Score: {score:.4f} | "
+                f"Timestamp: {start:.1f}s-{end:.1f}s | "
+                f"Text: {text}..."
+            )
+        # ──────────────────────────────────────────────────────────────────────────
         
         logger.info(f"Retrieved {len(results)} relevant chunks")
         

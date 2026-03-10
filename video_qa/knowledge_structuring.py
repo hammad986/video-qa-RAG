@@ -199,8 +199,8 @@ def create_chunk_from_segments(segments: List[Dict[str, Any]]) -> Dict[str, Any]
 
 def fixed_chunking(
     segments: List[Dict[str, Any]],
-    chunk_size: int = 150,
-    overlap: int = 40
+    chunk_size: int = None,
+    overlap: int = None
 ) -> List[Dict[str, Any]]:
     """
     Fallback fixed word-count chunking.
@@ -213,41 +213,50 @@ def fixed_chunking(
     Returns:
         List of chunks
     """
+    # FIX: Make chunk_size and overlap configurable from config
+    if chunk_size is None or overlap is None:
+        from .config import config
+        chunking_config = config.get_section("chunking")
+        fixed_config = chunking_config.get("fixed", {})
+        if chunk_size is None:
+            chunk_size = fixed_config.get("chunk_size_words", 150)
+        if overlap is None:
+            overlap = fixed_config.get("overlap_words", 40)
+
     chunks = []
     current_chunk = []
     word_count = 0
-    
+
     for seg in segments:
         text = seg.get("text", "").strip()
         if not text:
             continue
-            
         words = text.split()
         word_len = len(words)
-        
+
         if word_count + word_len <= chunk_size:
             current_chunk.append(seg)
             word_count += word_len
         else:
             if current_chunk:
                 chunks.append(create_chunk_from_segments(current_chunk))
-            
+
             # Create overlap from previous chunk
             overlap_chunk = []
             overlap_words = 0
-            
+
             for prev in reversed(current_chunk):
                 overlap_chunk.insert(0, prev)
                 overlap_words += len(prev["text"].split())
                 if overlap_words >= overlap:
                     break
-            
+
             current_chunk = overlap_chunk + [seg]
             word_count = sum(len(x["text"].split()) for x in current_chunk)
-    
+
     if current_chunk:
         chunks.append(create_chunk_from_segments(current_chunk))
-    
+
     return chunks
 
 
