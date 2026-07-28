@@ -56,7 +56,7 @@ Modern LLMs often hallucinate or provide unverifiable answers, especially for vi
 ## Installation Instructions
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/yourusername/video-qa-rag.git
+   git clone https://github.com/hammad986/video-qa-rag.git
    cd video-qa-rag
    ```
 2. **Set up Python environment:**
