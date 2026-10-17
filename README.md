@@ -8,7 +8,7 @@ sdk_version: 4.44.1
 app_file: app.py
 pinned: false
 license: mit
-short_description: Evidence-grounded Video Question Answering with RAG and DeepSeek V4 Flash
+short_description: Evidence-grounded Video-QA with RAG and DeepSeek
 ---
 
 # Video-QA RAG: Evidence-Based Video Question Answering
