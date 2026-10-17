@@ -361,14 +361,6 @@ with gr.Blocks(title="Video-QA RAG Assistant") as demo:
                 with gr.Accordion("📝 Pre-computed Lecture Summary", open=False):
                     summary_out = gr.TextArea(label="Summary", interactive=False, lines=6)
 
-                active_video_state = gr.State(value=None)
-
-                process_btn.click(
-                    fn=process_video_fn,
-                    inputs=[file_input, yt_input, cookie_file_input, cookie_text_input],
-                    outputs=[status_out, transcript_out, summary_out, active_video_state, active_video_banner]
-                )
-
             # ── TAB 2: Question Answering ──────────────────────────────
             with gr.TabItem("💬 2. Ask Questions (RAG QA)"):
                 active_video_banner = gr.Markdown("ℹ️ **Active Video:** None *(Please ingest a video in Tab 1 first)*")
@@ -399,17 +391,6 @@ with gr.Blocks(title="Video-QA RAG Assistant") as demo:
                 with gr.Accordion("🔎 Retrieved Supporting Segments", open=True):
                     evidence_output = gr.Markdown()
 
-                ask_btn.click(
-                    fn=answer_user_question,
-                    inputs=[question_input, use_rewrite_chk, active_video_state],
-                    outputs=[answer_output, timestamp_output, evidence_output]
-                )
-                question_input.submit(
-                    fn=answer_user_question,
-                    inputs=[question_input, use_rewrite_chk, active_video_state],
-                    outputs=[answer_output, timestamp_output, evidence_output]
-                )
-
                 gr.Examples(
                     examples=[
                         ["what is the main idea of this video?"],
@@ -418,6 +399,26 @@ with gr.Blocks(title="Video-QA RAG Assistant") as demo:
                     ],
                     inputs=[question_input]
                 )
+
+        # ── Cross-Tab State & Event Bindings ───────────────────────────
+        active_video_state = gr.State(value=None)
+
+        process_btn.click(
+            fn=process_video_fn,
+            inputs=[file_input, yt_input, cookie_file_input, cookie_text_input],
+            outputs=[status_out, transcript_out, summary_out, active_video_state, active_video_banner]
+        )
+
+        ask_btn.click(
+            fn=answer_user_question,
+            inputs=[question_input, use_rewrite_chk, active_video_state],
+            outputs=[answer_output, timestamp_output, evidence_output]
+        )
+        question_input.submit(
+            fn=answer_user_question,
+            inputs=[question_input, use_rewrite_chk, active_video_state],
+            outputs=[answer_output, timestamp_output, evidence_output]
+        )
 
 if __name__ == "__main__":
     demo.queue().launch(server_name="0.0.0.0", server_port=7860)
