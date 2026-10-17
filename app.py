@@ -72,7 +72,12 @@ def download_youtube_audio(url: str) -> Optional[str]:
 
     ydl_opts = {
         "outtmpl": out_tmpl,
-        "format": "bestaudio/best",
+        "format": "ba/b",
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android", "ios"]
+            }
+        },
         "postprocessors": [{
             "key": "FFmpegExtractAudio",
             "preferredcodec": "wav",
