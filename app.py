@@ -94,10 +94,28 @@ def download_youtube_audio(url: str) -> Optional[str]:
         candidates = [f for f in tmp_dir.glob("*.*") if f.suffix.lower() != ".webp"]
     return str(candidates[0]) if candidates else None
 
-def _run_processing(file_to_process: str):
+def _run_processing_cpu(file_to_process: str):
     pipeline = get_pipeline()
     video_id = pipeline.process_video(file_to_process)
     return video_id
+
+if HAS_ZEROGPU:
+    @spaces.GPU(duration=30)
+    def _run_processing_gpu(file_to_process: str):
+        return _run_processing_cpu(file_to_process)
+
+    def _run_processing(file_to_process: str):
+        try:
+            return _run_processing_gpu(file_to_process)
+        except Exception as e:
+            err_msg = str(e).lower()
+            if "quota" in err_msg or "zerogpu" in err_msg:
+                print(f"ZeroGPU quota reached ({e}), running fallback on CPU...")
+                return _run_processing_cpu(file_to_process)
+            raise e
+else:
+    def _run_processing(file_to_process: str):
+        return _run_processing_cpu(file_to_process)
 
 def process_video_fn(video_file, youtube_url: str):
     """Process video/audio file or YouTube link into FAISS vector index."""
