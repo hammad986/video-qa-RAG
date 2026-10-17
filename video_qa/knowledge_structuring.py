@@ -34,8 +34,8 @@ def load_embedding_model():
         
         try:
             from sentence_transformers import SentenceTransformer
-            logger.info(f"Loading embedding model: {model_name}")
-            _embedding_model = SentenceTransformer(model_name)
+            logger.info(f"Loading embedding model: {model_name} on CPU")
+            _embedding_model = SentenceTransformer(model_name, device="cpu")
             logger.info("Embedding model loaded")
         except ImportError:
             logger.error("sentence-transformers not installed")
@@ -50,7 +50,7 @@ def get_sentence_embeddings(sentences: List[str]) -> np.ndarray:
     if model is None:
         return None
     
-    embeddings = model.encode(sentences, show_progress_bar=False)
+    embeddings = model.encode(sentences, show_progress_bar=False, device="cpu")
     return np.array(embeddings)
 
 

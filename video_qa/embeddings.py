@@ -98,8 +98,9 @@ def create_embeddings(texts: List[str], batch_size: int = 32) -> Optional[np.nda
     embeddings = model.encode(
         texts,
         batch_size=batch_size or embed_config.get("batch_size", 32),
-        show_progress_bar=True,
-        normalize_embeddings=normalize
+        show_progress_bar=False,
+        normalize_embeddings=normalize,
+        device="cpu"
     )
     
     if not normalize:

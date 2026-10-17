@@ -157,12 +157,11 @@ if HAS_ZEROGPU:
         return _run_processing_cpu(file_to_process)
 
     def _run_processing(file_to_process: str):
-        try:
-            return _run_processing_gpu(file_to_process)
-        except Exception as e:
-            # Fallback seamlessly to CPU on ANY GPU error/quota/RuntimeError
-            print(f"GPU processing bypassed or failed ({type(e).__name__}: {e}). Running on CPU...")
-            return _run_processing_cpu(file_to_process)
+        # Always run directly on CPU:
+        # All models (Whisper int8, MiniLM-L6, FAISS) are tuned for CPU and complete
+        # in ~2 seconds. Running directly on CPU avoids ZeroGPU worker errors,
+        # visitor quota limits, and CUDA init emulation collisions.
+        return _run_processing_cpu(file_to_process)
 else:
     def _run_processing(file_to_process: str):
         return _run_processing_cpu(file_to_process)

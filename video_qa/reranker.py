@@ -38,8 +38,8 @@ def load_reranker_model():
         
         try:
             from sentence_transformers import CrossEncoder
-            logger.info(f"Loading re-ranker model: {model_name}")
-            _reranker_model = CrossEncoder(model_name, max_length=512)
+            logger.info(f"Loading re-ranker model: {model_name} on {device}")
+            _reranker_model = CrossEncoder(model_name, max_length=512, device=device)
             logger.info("Re-ranker model loaded successfully")
         except ImportError:
             logger.warning("sentence-transformers not available for re-ranking")
@@ -48,7 +48,7 @@ def load_reranker_model():
             logger.warning(f"Failed to load re-ranker: {e}")
             # Try smaller model as fallback
             try:
-                _reranker_model = CrossEncoder("BAAI/bge-reranker-base")
+                _reranker_model = CrossEncoder("BAAI/bge-reranker-base", device=device)
                 logger.info("Using fallback: bge-reranker-base")
             except:
                 logger.warning("Re-ranking disabled - no suitable model found")
