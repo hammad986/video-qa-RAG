@@ -1,4 +1,5 @@
-gradio>=4.20.0
+gradio>=5.20.0
+pydantic<=2.10.6
 faster-whisper>=1.0.0
 sentence-transformers>=2.7.0
 faiss-cpu>=1.8.0

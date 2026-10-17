@@ -17,12 +17,24 @@ if str(root_dir) not in sys.path:
 from dotenv import load_dotenv
 load_dotenv()
 
-# ZeroGPU integration if running on Hugging Face Spaces with ZeroGPU
+# Compatibility patch for huggingface_hub >= 1.0 with older Gradio oauth
 try:
-    import spaces
-    HAS_ZEROGPU = True
-except ImportError:
-    HAS_ZEROGPU = False
+    import huggingface_hub
+    if not hasattr(huggingface_hub, "HfFolder"):
+        class HfFolder:
+            @staticmethod
+            def get_token():
+                import os
+                return os.environ.get("HF_TOKEN")
+            @staticmethod
+            def save_token(token):
+                pass
+            @staticmethod
+            def delete_token():
+                pass
+        huggingface_hub.HfFolder = HfFolder
+except Exception:
+    pass
 
 import gradio as gr
 from video_qa.pipeline import VideoQAPipeline
