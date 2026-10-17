@@ -113,7 +113,8 @@ def create_embeddings(texts: List[str], batch_size: int = 32) -> Optional[np.nda
 def build_vector_index(
     chunks_dir: str = "data/chunks",
     model_dir: str = "models",
-    reset: bool = False
+    reset: bool = False,
+    target_video_id: Optional[str] = None
 ) -> bool:
     """
     Build FAISS vector index from chunk files.
@@ -124,6 +125,8 @@ def build_vector_index(
         reset:      When True, discard any existing index and build from scratch.
                     Pass reset=True when processing a new video to prevent
                     cross-video contamination.
+        target_video_id: Optional video ID. If provided, ONLY chunk file for this
+                         video is indexed.
         
     Returns:
         True if successful
@@ -133,7 +136,7 @@ def build_vector_index(
     logger.info("="*50)
 
     if reset:
-        logger.info("reset=True — discarding existing index and starting fresh.")
+        logger.info(f"reset=True — discarding existing index and starting fresh (target_video_id={target_video_id}).")
     
     # Setup paths
     chunks_path = Path(chunks_dir)
@@ -150,8 +153,21 @@ def build_vector_index(
     meta_path  = Path(_cfg_meta)  if Path(_cfg_meta).parent  != Path(".") else model_path / _cfg_meta
     
     # ── CROSS-VIDEO CONTAMINATION FIX ──────────────────────────────────────
-    # When reset=True, skip loading the old index entirely so we build a
-    # clean index containing only the newly uploaded video's chunks.
+    # When reset=True, physically unlink old index/metadata to guarantee fresh state
+    if reset:
+        if index_path.exists():
+            try:
+                index_path.unlink()
+                logger.info(f"Unlinked old FAISS index: {index_path}")
+            except Exception as e:
+                logger.warning(f"Could not remove old index: {e}")
+        if meta_path.exists():
+            try:
+                meta_path.unlink()
+                logger.info(f"Unlinked old metadata: {meta_path}")
+            except Exception as e:
+                logger.warning(f"Could not remove old metadata: {e}")
+
     existing_texts = []
     existing_metadata = []
     existing_embeddings = None
@@ -171,12 +187,22 @@ def build_vector_index(
             logger.warning(f"Failed to load existing index: {e}")
             existing_metadata = []
     
-    # Load all chunk files
+    # Load chunk files
     if not chunks_path.exists():
         logger.error(f"Chunks directory not found: {chunks_dir}")
         return False
     
-    chunk_files = list(chunks_path.glob("*.json"))
+    if target_video_id:
+        target_file = chunks_path / f"{target_video_id}.json"
+        if target_file.exists():
+            chunk_files = [target_file]
+            logger.info(f"Indexing targeted video chunk file exclusively: {target_file.name}")
+        else:
+            logger.warning(f"Target chunk file {target_file.name} not found, searching glob...")
+            chunk_files = list(chunks_path.glob("*.json"))
+    else:
+        chunk_files = list(chunks_path.glob("*.json"))
+
     if not chunk_files:
         logger.error("No chunk files found")
         return False
@@ -449,20 +475,16 @@ class VectorStore:
             return out
 
         if video_id:
-            # First try: filter by video_id
+            # Strict filter by video_id to prevent any cross-video chunk leakage
             results = _collect(apply_filter=True)
             if not results:
-                # Fall-back: return global top-k (avoids 0-chunk failure when
-                # index was built before video_id tracking was introduced)
                 logger.warning(
-                    f"video_id filter '{video_id}' matched 0 chunks — "
-                    "falling back to un-filtered top-k retrieval."
+                    f"video_id filter '{video_id}' matched 0 chunks."
                 )
-                results = _collect(apply_filter=False)
         else:
             results = _collect(apply_filter=False)
 
-        logger.info(f"FAISS returned {len(results)} chunks for query: {query[:60]!r}")
+        logger.info(f"FAISS returned {len(results)} chunks for query: {query[:60]!r} (video_id={video_id})")
         return results
     
     def get_all_chunks(self) -> List[Dict[str, Any]]:

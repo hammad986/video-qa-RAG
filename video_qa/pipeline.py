@@ -59,6 +59,7 @@ class VideoQAPipeline:
         self.retriever = None
         self.reranker = None
         self.answer_generator = None
+        self.active_video_id = None
         self._initialize_components()
     
     def _initialize_components(self):
@@ -74,12 +75,13 @@ class VideoQAPipeline:
         
         logger.info("Pipeline components initialized")
     
-    def process_video(self, video_path: str) -> Optional[str]:
+    def process_video(self, video_path: str, reset: bool = True) -> Optional[str]:
         """
         Process a video through the complete pipeline.
         
         Args:
             video_path: Path to video file
+            reset:      Whether to reset previous video index and chunks
             
         Returns:
             video_id string if successful, else None
@@ -95,14 +97,26 @@ class VideoQAPipeline:
             logger.error("FFmpeg not available")
             return None
 
+        # Clean all previous chunks & transcripts if reset=True to guarantee zero cross-video contamination
+        if reset:
+            logger.info("Resetting old session data across data/ directories...")
+            for folder in ["data/chunks", "data/transcripts", "data/summaries"]:
+                p = Path(folder)
+                if p.exists():
+                    for f in p.glob("*.json"):
+                        try:
+                            f.unlink()
+                            logger.info(f"Cleared previous session file: {f.name}")
+                        except Exception:
+                            pass
+
         # Always force re-extract audio so a re-uploaded video is never skipped.
         audio_path = convert_video_to_audio(video_path, force=True)
         if audio_path is None:
             logger.error("Audio extraction failed")
             return None
 
-        # ── STALE-CACHE FIX: remove old transcript + chunk files for this stem
-        # so that Whisper always runs and chunking always produces fresh output.
+        # Remove stale transcript / chunk files for this stem if any
         stem = Path(audio_path).stem
         for _stale in [
             Path("data/transcripts") / f"{stem}.json",
@@ -128,21 +142,21 @@ class VideoQAPipeline:
             logger.error("Chunking failed")
             return None
 
-        # Stage 4: Indexing
-        # reset=True clears the existing FAISS index so chunks from a *previous*
-        # video are not mixed with chunks from this new video.
-        logger.info("\n[STAGE 4/5] Building Vector Index (BGE Embeddings) — fresh index...")
+        video_id = Path(transcript_path).stem
 
-        success = build_vector_index(reset=True)
+        # Stage 4: Indexing
+        # reset=True and target_video_id=video_id clears any existing FAISS index
+        # and guarantees that exclusively this video's chunks are indexed.
+        logger.info(f"\n[STAGE 4/5] Building Vector Index for video_id={video_id}...")
+
+        success = build_vector_index(reset=True, target_video_id=video_id)
         if not success:
             logger.error("Index building failed")
             return None
 
         # ── HYBRID RAG: Generate lecture summary ─────────────────────────────
         # Load the raw transcript text and send it to the LLM to produce a
-        # 5-bullet overview.  Stored at data/summaries/<video_id>.json.
-        # Non-blocking: a failure to generate the summary is only a warning.
-        video_id = Path(transcript_path).stem
+        # 5-bullet overview. Stored at data/summaries/<video_id>.json.
         logger.info("\n[STAGE 5/5] Generating lecture summary…")
         try:
             import json as _json
@@ -163,7 +177,8 @@ class VideoQAPipeline:
         logger.info("\n[COMPLETE] Pipeline finished!")
         logger.info("="*60)
 
-        # Re-initialize components with new index
+        # Set active video ID and re-initialize components with fresh index
+        self.active_video_id = video_id
         self._initialize_components()
 
         return video_id
@@ -221,12 +236,13 @@ class VideoQAPipeline:
         Returns:
             Dictionary with answer, timestamp, contexts, and metadata
         """
+        target_video_id = active_video_id or getattr(self, "active_video_id", None)
         logger.info("="*60)
-        logger.info(f"QUERY: {query}")
+        logger.info(f"QUERY: {query} | TARGET VIDEO: {target_video_id}")
         logger.info("="*60)
 
         # ── PATH A: Summary / overview questions ─────────────────────────────
-        summary_result = route_summary_query(query, active_video_id)
+        summary_result = route_summary_query(query, target_video_id)
         if summary_result is not None:
             logger.info("[Pipeline] Returning pre-computed lecture summary.")
             return summary_result
@@ -250,9 +266,9 @@ class VideoQAPipeline:
             logger.info("Using original query for search.")
 
         # Stage 5B: Retrieval (top-5)
-        # Use search_query for retrieving relevant chunks
-        logger.info("\n[RETRIEVAL] Finding relevant passages...")
-        retrieved = self.retriever.retrieve(search_query, top_k=5, video_id=active_video_id)
+        # Use search_query for retrieving relevant chunks scoped to target_video_id
+        logger.info(f"\n[RETRIEVAL] Finding relevant passages for video: {target_video_id}...")
+        retrieved = self.retriever.retrieve(search_query, top_k=5, video_id=target_video_id)
 
         if not retrieved:
             logger.warning("No relevant passages found")

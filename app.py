@@ -169,23 +169,49 @@ else:
 def process_video_fn(video_file, youtube_url: str, cookie_file=None, cookie_text: str = ""):
     """Process video/audio file or YouTube link into FAISS vector index."""
     if not video_file and not (youtube_url and youtube_url.strip()):
-        return "⚠️ Please provide either a video/audio file or a YouTube URL.", "", ""
+        return (
+            "⚠️ Please provide either a video/audio file or a YouTube URL.",
+            "",
+            "",
+            None,
+            "ℹ️ **Active Video:** None *(Please process a video in Tab 1 first)*"
+        )
 
     file_to_process = None
 
     try:
-        if youtube_url and youtube_url.strip():
+        # Prioritize uploaded file if provided, otherwise extract from YouTube
+        if video_file:
+            file_to_process = video_file
+            print(f"Ingesting uploaded local video/audio file: {video_file}")
+        elif youtube_url and youtube_url.strip():
             target_url = youtube_url.strip()
+            print(f"Ingesting YouTube audio from: {target_url}")
             file_to_process = download_youtube_audio(target_url, cookie_file, cookie_text)
             if not file_to_process:
-                return "❌ Failed to extract audio stream from YouTube URL.", "", ""
-        elif video_file:
-            file_to_process = video_file
+                return (
+                    "❌ Failed to extract audio stream from YouTube URL.",
+                    "",
+                    "",
+                    None,
+                    "⚠️ **Active Video:** None"
+                )
 
-        # Process through RAG ingestion pipeline
+        # Process through RAG ingestion pipeline (cleans old session data & builds clean index)
         video_id = _run_processing(file_to_process)
         if not video_id:
-            return "❌ Processing failed during transcription or chunking.", "", ""
+            return (
+                "❌ Processing failed during transcription or chunking.",
+                "",
+                "",
+                None,
+                "⚠️ **Active Video:** None"
+            )
+
+        # Force reload singleton pipeline so in-memory VectorStore and active_video_id are fresh
+        global _pipeline
+        _pipeline = VideoQAPipeline()
+        _pipeline.active_video_id = video_id
 
         # Retrieve transcript
         transcript_file = Path("data/transcripts") / f"{video_id}.json"
@@ -203,21 +229,32 @@ def process_video_fn(video_file, youtube_url: str, cookie_file=None, cookie_text
             except Exception:
                 pass
 
-        summary_file = Path("data/summaries") / f"{video_id}_summary.txt"
+        # Retrieve summary from data/summaries/{video_id}.json
+        summary_file = Path("data/summaries") / f"{video_id}.json"
         summary_text = ""
         if summary_file.exists():
+            import json
             try:
-                summary_text = summary_file.read_text(encoding="utf-8")
+                with open(summary_file, "r", encoding="utf-8") as f:
+                    sdata = json.load(f)
+                    bullets = sdata.get("bullets", [])
+                    summary_text = "\n".join(bullets)
             except Exception:
                 pass
 
-        success_msg = f"✅ **Video successfully processed and indexed!**\n\n- **Video ID**: `{video_id}`\n- **Vector Index**: Ready for questions in the 'Ask Questions' tab."
-        return success_msg, transcript_text, summary_text
+        success_msg = (
+            f"✅ **Video successfully processed and indexed!**\n\n"
+            f"- **Active Video**: `{video_id}`\n"
+            f"- **Session Isolation**: Previous video chunks wiped. Vector database is 100% scoped to this video.\n"
+            f"- **Ready**: Ask factual questions or request an overview in Tab 2!"
+        )
+        banner_msg = f"🎥 **Active Video:** `{video_id}` *(Ready for questions)*"
+        return success_msg, transcript_text, summary_text, video_id, banner_msg
 
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return f"❌ Error processing video: {str(e) or repr(e)}", "", ""
+        return f"❌ Error processing video: {str(e) or repr(e)}", "", "", None, "⚠️ **Active Video:** Error"
 
 def handle_query_rewrite(question: str):
     """Rewrite question using AgentRouter deepseek-v4-flash."""
@@ -226,7 +263,7 @@ def handle_query_rewrite(question: str):
     rewritten = rewrite_query(question.strip(), force=True)
     return rewritten
 
-def answer_user_question(question: str, use_rewrite: bool):
+def answer_user_question(question: str, use_rewrite: bool, active_video_id: Optional[str] = None):
     """Answer question using AgentRouter deepseek-v4-flash with retrieved evidence."""
     if not question or not question.strip():
         return "⚠️ Please enter a question.", "N/A", "No evidence retrieved."
@@ -235,13 +272,17 @@ def answer_user_question(question: str, use_rewrite: bool):
     if not pipeline.retriever.is_available():
         return "⚠️ Knowledge base is empty. Please process a video in Tab 1 first.", "N/A", "No evidence retrieved."
 
+    current_vid = active_video_id or getattr(pipeline, "active_video_id", None)
+    if not current_vid and pipeline.retriever.vector_store and pipeline.retriever.vector_store.metadata:
+        current_vid = pipeline.retriever.vector_store.metadata[0].get("video_id")
+
     q = question.strip()
     if use_rewrite:
         rewritten = rewrite_query(q, force=False)
         if rewritten != q:
             q = rewritten
 
-    result = pipeline.ask(q)
+    result = pipeline.ask(q, active_video_id=current_vid)
 
     ans = result.get("answer", "No answer generated.")
     ts = result.get("timestamp") or "N/A"
@@ -320,14 +361,17 @@ with gr.Blocks(title="Video-QA RAG Assistant") as demo:
                 with gr.Accordion("📝 Pre-computed Lecture Summary", open=False):
                     summary_out = gr.TextArea(label="Summary", interactive=False, lines=6)
 
+                active_video_state = gr.State(value=None)
+
                 process_btn.click(
                     fn=process_video_fn,
                     inputs=[file_input, yt_input, cookie_file_input, cookie_text_input],
-                    outputs=[status_out, transcript_out, summary_out]
+                    outputs=[status_out, transcript_out, summary_out, active_video_state, active_video_banner]
                 )
 
             # ── TAB 2: Question Answering ──────────────────────────────
             with gr.TabItem("💬 2. Ask Questions (RAG QA)"):
+                active_video_banner = gr.Markdown("ℹ️ **Active Video:** None *(Please ingest a video in Tab 1 first)*")
                 gr.Markdown("Ask any factual or concept question about the processed video.")
                 question_input = gr.Textbox(
                     label="Your Question",
@@ -357,7 +401,12 @@ with gr.Blocks(title="Video-QA RAG Assistant") as demo:
 
                 ask_btn.click(
                     fn=answer_user_question,
-                    inputs=[question_input, use_rewrite_chk],
+                    inputs=[question_input, use_rewrite_chk, active_video_state],
+                    outputs=[answer_output, timestamp_output, evidence_output]
+                )
+                question_input.submit(
+                    fn=answer_user_question,
+                    inputs=[question_input, use_rewrite_chk, active_video_state],
                     outputs=[answer_output, timestamp_output, evidence_output]
                 )
 
