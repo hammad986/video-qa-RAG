@@ -21,12 +21,11 @@ from .logger import get_logger
 
 logger = get_logger(__name__)
 
-def rewrite_query(query: str) -> str:
-    """
-    Query rewriting stub (expand for advanced use).
-    For now, just return the query unchanged.
-    """
-    return query
+try:
+    from .query_rewriter import rewrite_query
+except ImportError:
+    def rewrite_query(query: str) -> str:
+        return query
 
 # ──────────────────────────────────────────────────────────────
 # EXTRACTIVE QA (deepset/roberta-base-squad2) — primary HuggingFace path
@@ -527,7 +526,56 @@ def ask_grok_llm(
     except Exception as exc:
         logger.warning(f"Grok API failed: {exc}")
 
-    return None
+def ask_agentrouter_llm(
+    prompt: str,
+    question: str = "",
+    contexts: Optional[List[Dict]] = None,
+    timeout: Optional[int] = None,
+) -> Optional[str]:
+    """
+    Ask AgentRouter API (https://agentrouter.org/v1) using deepseek-v4-flash.
+    Priority 1 for answer generation.
+    """
+    import os
+    api_key = os.environ.get("AGENTROUTER_API_KEY") or config.get("answer.agentrouter_api_key", "sk-opqFzZdgHqOkLnwar29MJhPaUy9cIVKbT8dv3f36tidBMwxP")
+    if not api_key:
+        logger.debug("No AgentRouter API key configured — skipping.")
+        return None
+
+    base_url = os.environ.get("AGENTROUTER_BASE_URL") or config.get("answer.agentrouter_url", "https://agentrouter.org/v1")
+    model = os.environ.get("AGENTROUTER_MODEL") or config.get("answer.agentrouter_model", "deepseek-v4-flash")
+
+    url = f"{base_url.rstrip('/')}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "User-Agent": "claude-cli/1.0.0 (external, cli)",
+    }
+
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.1,
+        "max_tokens": 512,
+    }
+
+    try:
+        resp = requests.post(url, json=payload, headers=headers, timeout=timeout or config.get("answer.timeout", 45))
+        if resp.status_code == 200:
+            data = resp.json()
+            answer = data["choices"][0]["message"]["content"].strip()
+            logger.info(f"AgentRouter answer ({model}): {answer[:120]}...")
+            if "answer:" not in answer.lower():
+                answer = f"Answer: {answer}\nTimestamp: None"
+            return answer
+        else:
+            logger.warning(f"AgentRouter API returned status {resp.status_code}: {resp.text[:200]}")
+            return None
+    except Exception as exc:
+        logger.warning(f"AgentRouter API failed: {exc}")
+        return None
 
 
 def parse_answer(response: str) -> Tuple[Optional[str], Optional[str]]:
@@ -635,9 +683,15 @@ def _run_llm_cascade(
     """
     response = None
 
-    # 1. Local Ollama
-    if answer_config.get("use_local", True):
-        logger.info("[LLM] Trying LOCAL (Ollama)…")
+    # 1. AgentRouter (Primary: deepseek-v4-flash via agentrouter.org)
+    logger.info("[LLM] Trying AgentRouter (deepseek-v4-flash)…")
+    response = ask_agentrouter_llm(prompt, question=query, contexts=contexts)
+    if response:
+        logger.info("[LLM] AgentRouter answered.")
+
+    # 2. Local Ollama
+    if response is None and answer_config.get("use_local", True):
+        logger.info("[LLM] Local Ollama check…")
         response = ask_local_llm(prompt)
         if response:
             logger.info("[LLM] Local LLM answered.")

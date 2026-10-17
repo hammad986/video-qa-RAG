@@ -100,8 +100,13 @@ answer:
   # 6. Extractive fallback →  always available (no API key needed)
   # ──────────────────────────────────────────────────────
 
-  # 1. Local LLM (Ollama)
-  use_local: true
+  # 1. AgentRouter API (agentrouter.org - deepseek-v4-flash)
+  agentrouter_api_key: ${AGENTROUTER_API_KEY}
+  agentrouter_url: "https://agentrouter.org/v1"
+  agentrouter_model: "deepseek-v4-flash"
+
+  # 2. Local LLM (Ollama)
+  use_local: false
   local_model: "phi3:mini"  # or "llama3", "mistral", etc.
   ollama_url: "http://localhost:11434/api/generate"
   timeout: 180
