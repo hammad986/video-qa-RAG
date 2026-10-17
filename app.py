@@ -94,16 +94,10 @@ def download_youtube_audio(url: str) -> Optional[str]:
         candidates = [f for f in tmp_dir.glob("*.*") if f.suffix.lower() != ".webp"]
     return str(candidates[0]) if candidates else None
 
-def _run_processing_core(file_to_process: str):
+def _run_processing(file_to_process: str):
     pipeline = get_pipeline()
     video_id = pipeline.process_video(file_to_process)
     return video_id
-
-# Conditionally decorate for ZeroGPU
-if HAS_ZEROGPU:
-    _run_processing = spaces.GPU(duration=120)(_run_processing_core)
-else:
-    _run_processing = _run_processing_core
 
 def process_video_fn(video_file, youtube_url: str):
     """Process video/audio file or YouTube link into FAISS vector index."""
