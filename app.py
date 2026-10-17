@@ -36,6 +36,13 @@ try:
 except Exception:
     pass
 
+# ZeroGPU integration if running on Hugging Face Spaces with ZeroGPU
+try:
+    import spaces
+    HAS_ZEROGPU = True
+except ImportError:
+    HAS_ZEROGPU = False
+
 import gradio as gr
 from video_qa.pipeline import VideoQAPipeline
 from video_qa.query_rewriter import rewrite_query
