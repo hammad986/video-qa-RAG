@@ -4,6 +4,7 @@ Handles video input and audio extraction using ffmpeg.
 """
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -128,7 +129,8 @@ def convert_video_to_audio(
     audio_path.mkdir(parents=True, exist_ok=True)
     
     filename = Path(video_path).stem
-    output_path = audio_path / f"{filename}.wav"
+    clean_stem = re.sub(r'[^a-zA-Z0-9_\-]', '_', filename)
+    output_path = audio_path / f"{clean_stem}.wav"
     
     # Skip if already converted (unless force)
     if output_path.exists() and not force:

@@ -60,8 +60,26 @@ def sec_to_time(seconds: float) -> str:
     total = int(seconds or 0)
     return f"{total // 60:02d}:{total % 60:02d}"
 
-def download_youtube_audio(url: str) -> Optional[str]:
-    """Download audio stream from YouTube URL using yt-dlp."""
+def prepare_cookies(cookie_file=None, cookie_text: str = "") -> Optional[str]:
+    """Resolve cookie file from user upload, paste, local file, or env var."""
+    if cookie_file and os.path.exists(str(cookie_file)):
+        return str(cookie_file)
+    if cookie_text and cookie_text.strip():
+        tmp = Path(tempfile.mkdtemp()) / "cookies.txt"
+        tmp.write_text(cookie_text.strip(), encoding="utf-8")
+        return str(tmp)
+    local_cookie = Path("cookies.txt")
+    if local_cookie.exists():
+        return str(local_cookie)
+    env_cookie = os.getenv("YOUTUBE_COOKIES") or os.getenv("COOKIES_TXT")
+    if env_cookie and env_cookie.strip():
+        tmp = Path(tempfile.mkdtemp()) / "cookies.txt"
+        tmp.write_text(env_cookie.strip(), encoding="utf-8")
+        return str(tmp)
+    return None
+
+def download_youtube_audio(url: str, cookie_file=None, cookie_text: str = "") -> Optional[str]:
+    """Download audio stream from YouTube URL using yt-dlp with cookie support."""
     try:
         import yt_dlp
     except ImportError:
@@ -70,12 +88,14 @@ def download_youtube_audio(url: str) -> Optional[str]:
     tmp_dir = Path(tempfile.mkdtemp())
     out_tmpl = str(tmp_dir / "%(id)s.%(ext)s")
 
+    cookie_path = prepare_cookies(cookie_file, cookie_text)
+
     ydl_opts = {
         "outtmpl": out_tmpl,
         "format": "ba/b",
         "extractor_args": {
             "youtube": {
-                "player_client": ["android", "ios"]
+                "player_client": ["android", "ios", "mweb", "web"]
             }
         },
         "postprocessors": [{
@@ -85,13 +105,45 @@ def download_youtube_audio(url: str) -> Optional[str]:
         "quiet": True,
         "no_warnings": True,
     }
+    if cookie_path and os.path.exists(cookie_path):
+        ydl_opts["cookiefile"] = cookie_path
+        print(f"Loaded YouTube cookies from: {cookie_path}")
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.download([url])
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+    except Exception as primary_err:
+        err_str = str(primary_err)
+        print(f"Primary YouTube extraction failed: {err_str}")
+        if "Sign in to confirm you're not a bot" in err_str or "cookies" in err_str.lower():
+            if not cookie_path:
+                raise RuntimeError(
+                    "YouTube Bot Protection on Cloud Servers: YouTube requires cookies on cloud datacenter IPs. "
+                    "Please either:\n"
+                    "1. Upload the video/audio file (.mp4, .wav, .mp3) directly using 'Or Upload Video / Audio File', or\n"
+                    "2. Export your YouTube cookies using 'Get cookies.txt LOCALLY' extension and upload/paste them in the '🍪 YouTube Cookies' section below."
+                )
+        # Try fallback options without player_client restrictions
+        try:
+            fallback_opts = {
+                "outtmpl": out_tmpl,
+                "format": "ba/b",
+                "postprocessors": [{
+                    "key": "FFmpegExtractAudio",
+                    "preferredcodec": "wav",
+                }],
+                "quiet": True,
+            }
+            if cookie_path and os.path.exists(cookie_path):
+                fallback_opts["cookiefile"] = cookie_path
+            with yt_dlp.YoutubeDL(fallback_opts) as ydl:
+                ydl.download([url])
+        except Exception as fallback_err:
+            raise RuntimeError(f"YouTube extraction failed: {fallback_err}")
 
     candidates = list(tmp_dir.glob("*.wav"))
     if not candidates:
-        candidates = [f for f in tmp_dir.glob("*.*") if f.suffix.lower() != ".webp"]
+        candidates = [f for f in tmp_dir.glob("*.*") if f.suffix.lower() not in [".webp", ".jpg", ".png", ".json"]]
     return str(candidates[0]) if candidates else None
 
 def _run_processing_cpu(file_to_process: str):
@@ -108,16 +160,14 @@ if HAS_ZEROGPU:
         try:
             return _run_processing_gpu(file_to_process)
         except Exception as e:
-            err_msg = str(e).lower()
-            if "quota" in err_msg or "zerogpu" in err_msg:
-                print(f"ZeroGPU quota reached ({e}), running fallback on CPU...")
-                return _run_processing_cpu(file_to_process)
-            raise e
+            # Fallback seamlessly to CPU on ANY GPU error/quota/RuntimeError
+            print(f"GPU processing bypassed or failed ({type(e).__name__}: {e}). Running on CPU...")
+            return _run_processing_cpu(file_to_process)
 else:
     def _run_processing(file_to_process: str):
         return _run_processing_cpu(file_to_process)
 
-def process_video_fn(video_file, youtube_url: str):
+def process_video_fn(video_file, youtube_url: str, cookie_file=None, cookie_text: str = ""):
     """Process video/audio file or YouTube link into FAISS vector index."""
     if not video_file and not (youtube_url and youtube_url.strip()):
         return "⚠️ Please provide either a video/audio file or a YouTube URL.", "", ""
@@ -127,7 +177,7 @@ def process_video_fn(video_file, youtube_url: str):
     try:
         if youtube_url and youtube_url.strip():
             target_url = youtube_url.strip()
-            file_to_process = download_youtube_audio(target_url)
+            file_to_process = download_youtube_audio(target_url, cookie_file, cookie_text)
             if not file_to_process:
                 return "❌ Failed to extract audio stream from YouTube URL.", "", ""
         elif video_file:
@@ -166,7 +216,9 @@ def process_video_fn(video_file, youtube_url: str):
         return success_msg, transcript_text, summary_text
 
     except Exception as e:
-        return f"❌ Error processing video: {str(e)}", "", ""
+        import traceback
+        traceback.print_exc()
+        return f"❌ Error processing video: {str(e) or repr(e)}", "", ""
 
 def handle_query_rewrite(question: str):
     """Rewrite question using AgentRouter deepseek-v4-flash."""
@@ -239,6 +291,27 @@ with gr.Blocks(title="Video-QA RAG Assistant") as demo:
                         type="filepath"
                     )
 
+                with gr.Accordion("🍪 YouTube Cookies (Recommended if YouTube blocks direct link on cloud)", open=False):
+                    gr.Markdown(
+                        """
+                        YouTube restricts cloud datacenters (like Hugging Face Spaces) with bot verification.
+                        If you encounter bot detection, you can either:
+                        1. **Upload your video/audio directly** in the box above (100% reliable, no cookies required), **OR**
+                        2. Export your YouTube cookies using the extension [Get cookies.txt LOCALLY](https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc) and provide them below:
+                        """
+                    )
+                    with gr.Row():
+                        cookie_file_input = gr.File(
+                            label="Upload cookies.txt",
+                            file_types=[".txt"],
+                            type="filepath"
+                        )
+                        cookie_text_input = gr.TextArea(
+                            label="Or Paste Netscape Cookie Text",
+                            placeholder="# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t...",
+                            lines=3
+                        )
+
                 process_btn = gr.Button("🚀 Process Video & Ingest Knowledge", variant="primary")
                 status_out = gr.Markdown()
 
@@ -250,7 +323,7 @@ with gr.Blocks(title="Video-QA RAG Assistant") as demo:
 
                 process_btn.click(
                     fn=process_video_fn,
-                    inputs=[file_input, yt_input],
+                    inputs=[file_input, yt_input, cookie_file_input, cookie_text_input],
                     outputs=[status_out, transcript_out, summary_out]
                 )
 
