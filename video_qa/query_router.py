@@ -168,15 +168,26 @@ def generate_lecture_summary(
 
     response: Optional[str] = None
 
-    # 1. Ollama (local)
+    # 0. AgentRouter (Priority 1: deepseek-v4-flash)
     try:
-        from .answer_generator import ask_local_llm
-        _r = ask_local_llm(prompt, timeout=120)
-        if _r and not _is_error_response(_r):
-            response = _r
-            logger.info("[Summary] Local LLM generated summary.")
-    except Exception:
-        pass
+        from .answer_generator import ask_agentrouter_llm
+        raw = ask_agentrouter_llm(prompt)
+        if raw and not _is_error_response(raw):
+            response = raw.split("Answer:", 1)[-1].strip() if "Answer:" in raw else raw
+            logger.info("[Summary] AgentRouter deepseek-v4-flash generated summary.")
+    except Exception as exc:
+        logger.debug(f"[Summary] AgentRouter attempt failed: {exc}")
+
+    # 1. Ollama (local)
+    if not response:
+        try:
+            from .answer_generator import ask_local_llm
+            _r = ask_local_llm(prompt, timeout=120)
+            if _r and not _is_error_response(_r):
+                response = _r
+                logger.info("[Summary] Local LLM generated summary.")
+        except Exception:
+            pass
 
     # 2. Gemini
     if not response:
